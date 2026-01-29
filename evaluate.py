@@ -675,6 +675,42 @@ def evaluate_single_snr(
             # 收集预测和目标
             current_metrics = {}
             try:
+                if 'video_decoded' in results and 'video' in device_targets:
+                    video_decoded = results['video_decoded']
+                    target_video = device_targets['video']
+                    decoded_finite = torch.isfinite(video_decoded)
+                    target_finite = torch.isfinite(target_video)
+                    decoded_finite_count = decoded_finite.sum().item()
+                    target_finite_count = target_finite.sum().item()
+                    decoded_total = video_decoded.numel()
+                    target_total = target_video.numel()
+                    if batch_idx == 0:
+                        logger.info(
+                            "video_decoded finite ratio: %d/%d (%.6f)",
+                            decoded_finite_count,
+                            decoded_total,
+                            decoded_finite_count / max(decoded_total, 1),
+                        )
+                        logger.info(
+                            "target_video finite ratio: %d/%d (%.6f)",
+                            target_finite_count,
+                            target_total,
+                            target_finite_count / max(target_total, 1),
+                        )
+                    if decoded_finite_count < decoded_total:
+                        logger.warning(
+                            "检测到 video_decoded 非有限值: %d/%d (%.6f)",
+                            decoded_finite_count,
+                            decoded_total,
+                            decoded_finite_count / max(decoded_total, 1),
+                        )
+                    if target_finite_count < target_total:
+                        logger.warning(
+                            "检测到 target_video 非有限值: %d/%d (%.6f)",
+                            target_finite_count,
+                            target_total,
+                            target_finite_count / max(target_total, 1),
+                        )
                 current_metrics = calculate_multimodal_metrics(
                     predictions=results,
                     targets=device_targets,
