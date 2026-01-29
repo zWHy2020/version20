@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 from typing import Dict, Optional, List, Tuple, Any
 import argparse
 import logging
+import inspect
 from datetime import datetime
 from prettytable import PrettyTable
 import json
@@ -931,7 +932,20 @@ def main():
         if args.latent_down is not None:
             model_kwargs["latent_down"] = config.latent_down
         
-        # 创建模型
+        # 创建模型（过滤掉当前构造函数不支持的参数）
+        try:
+            model_param_names = set(inspect.signature(MultimodalJSCC.__init__).parameters.keys())
+            model_param_names.discard("self")
+            extra_keys = [key for key in model_kwargs if key not in model_param_names]
+            if extra_keys:
+                logger.warning(
+                    "⚠️ Checkpoint 配置中包含未在当前模型构造函数中出现的参数: %s; 将自动忽略。",
+                    ", ".join(sorted(extra_keys)),
+                )
+                for key in extra_keys:
+                    model_kwargs.pop(key, None)
+        except Exception as e:
+            logger.warning("构造参数过滤失败，将继续尝试初始化模型: %s", e)
         model = MultimodalJSCC(**model_kwargs)
         
         # 加载权重
