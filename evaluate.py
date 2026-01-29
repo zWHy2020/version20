@@ -9,6 +9,7 @@ import os
 import sys
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 from torch.utils.data import DataLoader
 from typing import Dict, Optional, List, Tuple, Any
@@ -21,7 +22,7 @@ import json
 
 # 导入模型和工具
 from multimodal_jscc import MultimodalJSCC
-from metrics import calculate_multimodal_metrics
+from metrics import calculate_multimodal_metrics, calculate_psnr, _validate_and_normalize_visual_data
 from data_loader import MultimodalDataLoader, MultimodalDataset
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
@@ -363,6 +364,101 @@ def collate_evaluation_batch(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     return batch_data
 
 
+def _calculate_stable_ssim(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    window_size: int = 11,
+    data_range: float = 1.0,
+) -> torch.Tensor:
+    """
+    评估脚本专用的稳定版 SSIM 计算，避免 NaN/Inf 传播。
+    """
+    pred = torch.clamp(pred, 0.0, data_range)
+    target = torch.clamp(target, 0.0, data_range)
+    if pred.dtype != torch.float32:
+        pred = pred.float()
+    if target.dtype != torch.float32:
+        target = target.float()
+
+    def gaussian_window(size: int, sigma: float = 1.5) -> torch.Tensor:
+        coords = torch.arange(size, dtype=torch.float32, device=pred.device)
+        coords = coords - size // 2
+        g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+        g = g / g.sum()
+        return g.unsqueeze(0).unsqueeze(0)
+
+    window = gaussian_window(window_size).to(pred.device)
+    window = window.expand(pred.size(1), 1, window_size, window_size)
+
+    mu1 = F.conv2d(pred, window, padding=window_size // 2, groups=pred.size(1))
+    mu2 = F.conv2d(target, window, padding=window_size // 2, groups=target.size(1))
+    mu1_sq = mu1.pow(2)
+    mu2_sq = mu2.pow(2)
+    mu1_mu2 = mu1 * mu2
+
+    sigma1_sq = F.conv2d(pred * pred, window, padding=window_size // 2, groups=pred.size(1)) - mu1_sq
+    sigma2_sq = F.conv2d(target * target, window, padding=window_size // 2, groups=target.size(1)) - mu2_sq
+    sigma12 = F.conv2d(pred * target, window, padding=window_size // 2, groups=target.size(1)) - mu1_mu2
+
+    sigma1_sq = torch.clamp(sigma1_sq, min=0.0)
+    sigma2_sq = torch.clamp(sigma2_sq, min=0.0)
+
+    C1 = (0.01 * data_range) ** 2
+    C2 = (0.03 * data_range) ** 2
+    numerator = (2 * mu1_mu2 + C1) * (2 * sigma12 + C2)
+    denominator = (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
+    eps = torch.finfo(denominator.dtype).eps
+    ssim_map = numerator / (denominator + eps)
+    ssim_map = torch.nan_to_num(ssim_map, nan=0.0, posinf=1.0, neginf=0.0)
+    ssim_map = torch.clamp(ssim_map, min=-1.0, max=1.0)
+    return ssim_map.mean()
+
+
+def _compute_stable_video_metrics(
+    pred_vid: torch.Tensor,
+    target_vid: torch.Tensor,
+    imagenet_normalized: bool,
+) -> Dict[str, float]:
+    pred_vid_norm, target_vid_norm = _validate_and_normalize_visual_data(
+        pred_vid,
+        target_vid,
+        target_range=(0.0, 1.0),
+        imagenet_normalized=imagenet_normalized,
+    )
+
+    _, T, _, _, _ = pred_vid_norm.shape
+    frame_psnrs = []
+    frame_ssims = []
+    for t in range(T):
+        frame_psnrs.append(
+            calculate_psnr(pred_vid_norm[:, t], target_vid_norm[:, t], max_val=1.0).item()
+        )
+        frame_ssims.append(
+            _calculate_stable_ssim(pred_vid_norm[:, t], target_vid_norm[:, t], data_range=1.0).item()
+        )
+
+    frame_psnrs_tensor = torch.tensor(frame_psnrs)
+    frame_ssims_tensor = torch.tensor(frame_ssims)
+    psnr_finite = torch.isfinite(frame_psnrs_tensor)
+    ssim_finite = torch.isfinite(frame_ssims_tensor)
+
+    metrics = {}
+    if psnr_finite.any():
+        metrics['video_psnr_mean'] = frame_psnrs_tensor[psnr_finite].mean().item()
+        metrics['video_psnr_std'] = frame_psnrs_tensor[psnr_finite].std().item()
+    else:
+        metrics['video_psnr_mean'] = 0.0
+        metrics['video_psnr_std'] = 0.0
+
+    if ssim_finite.any():
+        metrics['video_ssim_mean'] = frame_ssims_tensor[ssim_finite].mean().item()
+        metrics['video_ssim_std'] = frame_ssims_tensor[ssim_finite].std().item()
+    else:
+        metrics['video_ssim_mean'] = 0.0
+        metrics['video_ssim_std'] = 0.0
+
+    return metrics
+
 
 
 def evaluate_single_snr(
@@ -675,12 +771,55 @@ def evaluate_single_snr(
             # 收集预测和目标
             current_metrics = {}
             try:
+                if 'video_decoded' in results and 'video' in device_targets:
+                    video_decoded = results['video_decoded']
+                    target_video = device_targets['video']
+                    decoded_finite = torch.isfinite(video_decoded)
+                    target_finite = torch.isfinite(target_video)
+                    decoded_finite_count = decoded_finite.sum().item()
+                    target_finite_count = target_finite.sum().item()
+                    decoded_total = video_decoded.numel()
+                    target_total = target_video.numel()
+                    if batch_idx == 0:
+                        logger.info(
+                            "video_decoded finite ratio: %d/%d (%.6f)",
+                            decoded_finite_count,
+                            decoded_total,
+                            decoded_finite_count / max(decoded_total, 1),
+                        )
+                        logger.info(
+                            "target_video finite ratio: %d/%d (%.6f)",
+                            target_finite_count,
+                            target_total,
+                            target_finite_count / max(target_total, 1),
+                        )
+                    if decoded_finite_count < decoded_total:
+                        logger.warning(
+                            "检测到 video_decoded 非有限值: %d/%d (%.6f)",
+                            decoded_finite_count,
+                            decoded_total,
+                            decoded_finite_count / max(decoded_total, 1),
+                        )
+                    if target_finite_count < target_total:
+                        logger.warning(
+                            "检测到 target_video 非有限值: %d/%d (%.6f)",
+                            target_finite_count,
+                            target_total,
+                            target_finite_count / max(target_total, 1),
+                        )
                 current_metrics = calculate_multimodal_metrics(
                     predictions=results,
                     targets=device_targets,
                     attention_mask=attention_mask,
                     imagenet_normalized=getattr(config, "normalize", False),
                 )
+                if 'video_decoded' in results and 'video' in device_targets:
+                    stable_video_metrics = _compute_stable_video_metrics(
+                        results['video_decoded'],
+                        device_targets['video'],
+                        imagenet_normalized=getattr(config, "normalize", False),
+                    )
+                    current_metrics.update(stable_video_metrics)
             except Exception as e:
                 logger.error(f"计算当前批次评估指标时出错: {e}")
                 import traceback
