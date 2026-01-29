@@ -907,6 +907,7 @@ def main():
             'video_unet_base_channels': config.video_unet_base_channels,
             'video_unet_num_down': config.video_unet_num_down,
             'video_unet_num_res_blocks': config.video_unet_num_res_blocks,
+            'video_gop_size': getattr(config, "video_gop_size", None),
             'channel_type': config.channel_type,
             'snr_db': config.snr_db,
             'normalize_inputs': getattr(config, "normalize", False),
