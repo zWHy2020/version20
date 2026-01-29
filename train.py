@@ -1305,6 +1305,7 @@ def main():
         'video_use_optical_flow': config.video_use_optical_flow,
         'video_use_convlstm': config.video_use_convlstm,
         'video_output_dim': config.video_output_dim,
+        'video_gop_size': getattr(config, "video_gop_size", None),
         'channel_type': config.channel_type,
         'normalize_inputs': getattr(config, "normalize", False),
         'pretrained': getattr(config, 'pretrained', False),

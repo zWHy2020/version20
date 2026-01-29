@@ -1043,6 +1043,13 @@ def load_model(model_path: str, config: EvaluationConfig, device: torch.device, 
         config.video_eval_sampling_strategy = model_config.get(
             "video_eval_sampling_strategy", config.video_eval_sampling_strategy
         )
+        if "video_gop_size" in model_config:
+            config.video_gop_size = model_config["video_gop_size"]
+        elif getattr(config, "video_gop_size", None) is not None:
+            model_config["video_gop_size"] = config.video_gop_size
+        if getattr(config, "video_gop_size_override", None) is not None:
+            model_config["video_gop_size"] = config.video_gop_size_override
+            config.video_gop_size = config.video_gop_size_override
     else:
         logger.warning("⚠️ Checkpoint 中未找到配置信息！将使用 EvaluationConfig 的默认值（极高风险！）")
         model_config = {
@@ -1064,6 +1071,7 @@ def load_model(model_path: str, config: EvaluationConfig, device: torch.device, 
             'video_use_optical_flow': config.video_use_optical_flow,
             'video_use_convlstm': config.video_use_convlstm,
             'video_output_dim': config.video_output_dim,
+            'video_gop_size': getattr(config, "video_gop_size", None),
             'video_decoder_type': getattr(config, "video_decoder_type", "unet"),
             'video_unet_base_channels': getattr(config, "video_unet_base_channels", 64),
             'video_unet_num_down': getattr(config, "video_unet_num_down", 4),
@@ -1235,6 +1243,12 @@ def main():
     )
     parser.add_argument('--max-output-frames', type=int, default=None, help='推理输出最大帧数（调试用）')
     parser.add_argument(
+        '--video-gop-size',
+        type=int,
+        default=None,
+        help='显式指定视频GOP长度（用于对齐训练时的gop_size）',
+    )
+    parser.add_argument(
         '--video-sampling-strategy',
         type=str,
         default=None,
@@ -1317,12 +1331,15 @@ def main():
     config.infer_window_blend = args.infer_window_blend
     config.max_output_frames = args.max_output_frames
     config.normalize = args.normalize
+    config.video_gop_size_override = args.video_gop_size
     if args.use_text_guidance_image:
         config.use_text_guidance_image = True
     if args.use_text_guidance_video:
         config.use_text_guidance_video = True
     if args.video_sampling_strategy:
         config.video_sampling_strategy = args.video_sampling_strategy
+    if args.video_gop_size is not None:
+        config.video_gop_size = args.video_gop_size
     if config.snr_random:
         snr_generator = torch.Generator(device="cpu")
         snr_generator.manual_seed(config.seed)

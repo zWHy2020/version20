@@ -238,6 +238,7 @@ class EvaluationConfig:
         self.video_stride = 1
         self.video_sampling_strategy = "contiguous_clip"
         self.video_eval_sampling_strategy = "uniform"
+        self.video_gop_size = 5
         self.infer_window_len = None
         self.infer_window_stride = None
         self.infer_window_blend = "uniform"
@@ -296,4 +297,3 @@ class EvaluationConfig:
         self.video_latent_downsample_stride = self.video_latent_downsample_factor
         self.video_entropy_max_exact_quantile_elems = 2_000_000
         self.video_entropy_quantile_sample_size = 262_144
-
