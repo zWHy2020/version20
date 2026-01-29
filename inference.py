@@ -936,15 +936,34 @@ def save_result(
     normalized = result.get("normalized", True)
     if modality == 'image':
         # 保存图像
+        # 【修复】若输出路径是目录，则写入默认文件名，避免 IsADirectoryError
+        if output_path.endswith(os.sep) or os.path.isdir(output_path):
+            os.makedirs(output_path, exist_ok=True)
+            output_path = os.path.join(output_path, "reconstructed.png")
+
         # 【修复】确保输出路径有有效的扩展名
         if not os.path.splitext(output_path)[1]:
-            # 如果没有扩展名，添加默认的png扩展名
             output_path = output_path + '.png'
+
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
         
         reconstructed_np = denormalize_image(result['reconstructed'], normalized=normalized)
         Image.fromarray(reconstructed_np).save(output_path)
         return output_path
     elif modality == 'text':
+        if output_path.endswith(os.sep) or os.path.isdir(output_path):
+            os.makedirs(output_path, exist_ok=True)
+            output_path = os.path.join(output_path, "reconstructed.txt")
+
+        if not os.path.splitext(output_path)[1]:
+            output_path = output_path + '.txt'
+
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
         # 保存文本（这里只是简单示例，实际应该解码）
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(f"原始文本:\n{result['original']}\n\n")
