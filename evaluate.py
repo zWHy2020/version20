@@ -33,6 +33,7 @@ from utils import (
     AverageMeter, seed_torch, logger_configuration, makedirs, load_manifest,
     split_image_v2, merge_image_v2, split_video_v2, merge_video_v2
 )
+from utils_check import print_model_structure_info, check_state_dict_compatibility
 
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
@@ -779,6 +780,138 @@ def print_results_table(
         logger.info(f"\n{main_table}")
 
 
+def load_model(
+    model_path: str,
+    config: EvaluationConfig,
+    device: torch.device,
+    logger: logging.Logger,
+) -> MultimodalJSCC:
+    """
+    加载模型并严格校验权重。
+    """
+    logger.info("加载模型...")
+    checkpoint = torch.load(model_path, map_location=device)
+    if isinstance(checkpoint, dict) and "model_config" in checkpoint:
+        logger.info("从检查点恢复模型配置")
+        model_config = dict(checkpoint["model_config"])
+        model_config["pretrained"] = checkpoint["model_config"].get("pretrained", False)
+        model_config["freeze_encoder"] = False
+        if "video_decoder_type" not in model_config:
+            fallback_decoder = getattr(config, "video_decoder_type", "swin")
+            logger.warning(
+                "⚠️ Checkpoint 中缺少 video_decoder_type，回退到评估配置: %s",
+                fallback_decoder,
+            )
+            model_config["video_decoder_type"] = fallback_decoder
+        if "video_latent_downsample_factor" not in model_config:
+            fallback_factor = getattr(config, "video_latent_downsample_factor", None)
+            if fallback_factor is None:
+                fallback_factor = getattr(config, "video_latent_downsample_stride", None)
+            if fallback_factor is None:
+                fallback_factor = 2
+            logger.warning(
+                "⚠️ Checkpoint 中缺少 video_latent_downsample_factor，回退到评估配置: %s",
+                fallback_factor,
+            )
+            model_config["video_latent_downsample_factor"] = fallback_factor
+        if "video_latent_downsample_stride" not in model_config:
+            fallback_stride = model_config.get("video_latent_downsample_factor")
+            if fallback_stride is None:
+                fallback_stride = getattr(config, "video_latent_downsample_stride", None)
+            if fallback_stride is None:
+                fallback_stride = getattr(config, "video_latent_downsample_factor", 2)
+            model_config["video_latent_downsample_stride"] = fallback_stride
+        if "video_gop_size" not in model_config and getattr(config, "video_gop_size", None) is not None:
+            model_config["video_gop_size"] = config.video_gop_size
+    else:
+        logger.warning("⚠️ Checkpoint 中未找到配置信息，将使用 EvaluationConfig 默认值（风险较高）")
+        model_config = {
+            'vocab_size': config.vocab_size,
+            'text_embed_dim': config.text_embed_dim,
+            'text_num_heads': config.text_num_heads,
+            'text_num_layers': config.text_num_layers,
+            'text_output_dim': config.text_output_dim,
+            'img_size': config.img_size,
+            'patch_size': config.img_patch_size,
+            'img_embed_dims': config.img_embed_dims,
+            'img_depths': config.img_depths,
+            'img_num_heads': config.img_num_heads,
+            'img_output_dim': config.img_output_dim,
+            'mlp_ratio': getattr(config, 'mlp_ratio', 4.0),
+            'video_hidden_dim': config.video_hidden_dim,
+            'video_num_frames': config.video_num_frames,
+            'video_use_optical_flow': config.video_use_optical_flow,
+            'video_use_convlstm': config.video_use_convlstm,
+            'video_output_dim': config.video_output_dim,
+            'video_gop_size': getattr(config, "video_gop_size", None),
+            'video_decoder_type': getattr(config, "video_decoder_type", "unet"),
+            'video_unet_base_channels': getattr(config, "video_unet_base_channels", 64),
+            'video_unet_num_down': getattr(config, "video_unet_num_down", 4),
+            'video_unet_num_res_blocks': getattr(config, "video_unet_num_res_blocks", 2),
+            'channel_type': config.channel_type,
+            'snr_db': config.snr_db,
+            'normalize_inputs': getattr(config, "normalize", False),
+            'image_decoder_type': getattr(config, "image_decoder_type", "baseline"),
+            'generator_type': getattr(config, "generator_type", "vae"),
+            'generator_ckpt': getattr(config, "generator_ckpt", None),
+            'z_channels': getattr(config, "z_channels", 4),
+            'latent_down': getattr(config, "latent_down", 8),
+            'pretrained': False,
+        }
+
+    model_config["snr_db"] = config.snr_db
+    model_config["use_text_guidance_image"] = getattr(config, "use_text_guidance_image", False)
+    model_config["use_text_guidance_video"] = getattr(config, "use_text_guidance_video", False)
+    model_config["normalize_inputs"] = getattr(config, "normalize", False)
+    model_config["image_decoder_type"] = getattr(config, "image_decoder_type", model_config.get("image_decoder_type"))
+    model_config["generator_type"] = getattr(config, "generator_type", model_config.get("generator_type"))
+    model_config["generator_ckpt"] = getattr(config, "generator_ckpt", model_config.get("generator_ckpt"))
+    model_config["z_channels"] = getattr(config, "z_channels", model_config.get("z_channels"))
+    model_config["latent_down"] = getattr(config, "latent_down", model_config.get("latent_down"))
+
+    model_kwargs = dict(model_config)
+    try:
+        model_param_names = set(inspect.signature(MultimodalJSCC.__init__).parameters.keys())
+        model_param_names.discard("self")
+        extra_keys = [key for key in model_kwargs if key not in model_param_names]
+        if extra_keys:
+            logger.warning(
+                "⚠️ Checkpoint 配置中包含未在当前模型构造函数中出现的参数: %s; 将自动忽略。",
+                ", ".join(sorted(extra_keys)),
+            )
+            for key in extra_keys:
+                model_kwargs.pop(key, None)
+    except Exception as e:
+        logger.warning("构造参数过滤失败，将继续尝试初始化模型: %s", e)
+
+    model = MultimodalJSCC(**model_kwargs)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        state_dict = checkpoint["model_state_dict"]
+    else:
+        state_dict = checkpoint
+    logger.info("=== 模型结构验证 ===")
+    print_model_structure_info(model, logger)
+    if not check_state_dict_compatibility(model, state_dict, logger):
+        raise RuntimeError("模型配置与权重文件维度不匹配，请检查代码是否与训练版本一致。")
+    model_state_keys = set(model.state_dict().keys())
+    unexpected_keys = [key for key in state_dict.keys() if key not in model_state_keys]
+    if unexpected_keys:
+        preview = ", ".join(sorted(unexpected_keys)[:10])
+        logger.warning(
+            "⚠️ 检测到 %d 个 checkpoint 权重在当前模型中不存在，将自动忽略。示例: %s",
+            len(unexpected_keys),
+            preview if preview else "无",
+        )
+        state_dict = {key: value for key, value in state_dict.items() if key in model_state_keys}
+    model.load_state_dict(state_dict, strict=True)
+    model = model.to(device)
+    model.eval()
+    logger.info("模型加载成功")
+    total_params = sum(p.numel() for p in model.parameters())
+    logger.info(f"模型总参数: {total_params:,}")
+    return model
+
+
 def main():
     parser = argparse.ArgumentParser(description='多模态JSCC评估脚本')
     parser.add_argument('--model-path', type=str, required=True, help='模型权重路径')
@@ -879,98 +1012,13 @@ def main():
     logger.info(f"测试清单: {config.test_manifest}")
     logger.info(f"SNR列表: {config.snr_list}")
     
-    # 加载模型
-    logger.info("加载模型...")
     try:
-        # 加载检查点
-        checkpoint = torch.load(config.model_path, map_location=config.device)
-        
-        # 尝试从检查点中恢复模型配置（如果存在）
-        model_kwargs = {
-            'vocab_size': config.vocab_size,
-            'text_embed_dim': config.text_embed_dim,
-            'text_num_heads': config.text_num_heads,
-            'text_num_layers': config.text_num_layers,
-            'text_output_dim': config.text_output_dim,
-            'img_size': config.img_size,
-            'patch_size': config.img_patch_size,
-            'img_embed_dims': config.img_embed_dims,
-            'img_depths': config.img_depths,
-            'img_num_heads': config.img_num_heads,
-            'img_output_dim': config.img_output_dim,
-            'video_hidden_dim': config.video_hidden_dim,
-            'video_num_frames': config.video_num_frames,
-            'video_use_optical_flow': config.video_use_optical_flow,
-            'video_use_convlstm': config.video_use_convlstm,
-            'video_output_dim': config.video_output_dim,
-            'video_decoder_type': config.video_decoder_type,
-            'video_unet_base_channels': config.video_unet_base_channels,
-            'video_unet_num_down': config.video_unet_num_down,
-            'video_unet_num_res_blocks': config.video_unet_num_res_blocks,
-            'video_gop_size': getattr(config, "video_gop_size", None),
-            'channel_type': config.channel_type,
-            'snr_db': config.snr_db,
-            'normalize_inputs': getattr(config, "normalize", False),
-            'image_decoder_type': getattr(config, "image_decoder_type", "baseline"),
-            'generator_type': getattr(config, "generator_type", "vae"),
-            'generator_ckpt': getattr(config, "generator_ckpt", None),
-            'z_channels': getattr(config, "z_channels", 4),
-            'latent_down': getattr(config, "latent_down", 8),
-        }
-        
-        # 如果检查点中包含模型配置，使用检查点的配置
-        if isinstance(checkpoint, dict) and 'model_config' in checkpoint:
-            model_kwargs.update(checkpoint['model_config'])
-            logger.info("从检查点恢复模型配置")
-        if args.image_decoder_type is not None:
-            model_kwargs["image_decoder_type"] = config.image_decoder_type
-        if args.generator_type is not None:
-            model_kwargs["generator_type"] = config.generator_type
-        if args.generator_ckpt is not None:
-            model_kwargs["generator_ckpt"] = config.generator_ckpt
-        if args.z_channels is not None:
-            model_kwargs["z_channels"] = config.z_channels
-        if args.latent_down is not None:
-            model_kwargs["latent_down"] = config.latent_down
-        
-        # 创建模型（过滤掉当前构造函数不支持的参数）
-        try:
-            model_param_names = set(inspect.signature(MultimodalJSCC.__init__).parameters.keys())
-            model_param_names.discard("self")
-            extra_keys = [key for key in model_kwargs if key not in model_param_names]
-            if extra_keys:
-                logger.warning(
-                    "⚠️ Checkpoint 配置中包含未在当前模型构造函数中出现的参数: %s; 将自动忽略。",
-                    ", ".join(sorted(extra_keys)),
-                )
-                for key in extra_keys:
-                    model_kwargs.pop(key, None)
-        except Exception as e:
-            logger.warning("构造参数过滤失败，将继续尝试初始化模型: %s", e)
-        model = MultimodalJSCC(**model_kwargs)
-        
-        # 加载权重
-        if isinstance(checkpoint, dict):
-            if 'model_state_dict' in checkpoint:
-                model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-                logger.info("加载模型权重（从model_state_dict）")
-            else:
-                # 直接是state_dict
-                model.load_state_dict(checkpoint, strict=False)
-                logger.info("加载模型权重（直接state_dict）")
-        else:
-            model.load_state_dict(checkpoint, strict=False)
-            logger.info("加载模型权重（检查点本身）")
-        
-        model = model.to(config.device)
-        model.eval()
-        
-        logger.info("模型加载成功")
-        
-        # 打印模型信息
-        total_params = sum(p.numel() for p in model.parameters())
-        logger.info(f"模型总参数: {total_params:,}")
-        
+        model = load_model(
+            model_path=config.model_path,
+            config=config,
+            device=config.device,
+            logger=logger,
+        )
     except Exception as e:
         logger.error(f"模型加载失败: {e}")
         logger.error("请确保模型路径正确，且模型结构与代码匹配")
