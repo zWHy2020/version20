@@ -1012,6 +1012,13 @@ def load_model(model_path: str, config: EvaluationConfig, device: torch.device, 
         model_config = checkpoint['model_config']
         model_config['pretrained'] = checkpoint['model_config'].get('pretrained', False)
         model_config['freeze_encoder'] = False
+        if "video_decoder_type" not in model_config:
+            fallback_decoder = getattr(config, "video_decoder_type", "swin")
+            logger.warning(
+                "⚠️ Checkpoint 中缺少 video_decoder_type，回退到推理配置: %s",
+                fallback_decoder,
+            )
+            model_config["video_decoder_type"] = fallback_decoder
         if 'img_embed_dims' in model_config:
             config.img_embed_dims = model_config['img_embed_dims']
         if getattr(config, "image_decoder_type_override", None) is not None:
