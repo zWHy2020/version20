@@ -100,13 +100,20 @@ def calculate_ssim(
     sigma1_sq = F.conv2d(pred * pred, window, padding=window_size//2, groups=pred.size(1)) - mu1_sq
     sigma2_sq = F.conv2d(target * target, window, padding=window_size//2, groups=target.size(1)) - mu2_sq
     sigma12 = F.conv2d(pred * target, window, padding=window_size//2, groups=target.size(1)) - mu1_mu2
+    # 数值稳定性：方差可能出现轻微负值，进行下限裁剪
+    sigma1_sq = torch.clamp(sigma1_sq, min=0.0)
+    sigma2_sq = torch.clamp(sigma2_sq, min=0.0)
     
     # SSIM参数（使用 data_range）
     C1 = (0.01 * data_range) ** 2
     C2 = (0.03 * data_range) ** 2
     
-    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / \
-               ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+    numerator = (2 * mu1_mu2 + C1) * (2 * sigma12 + C2)
+    denominator = (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
+    eps = torch.finfo(denominator.dtype).eps
+    ssim_map = numerator / (denominator + eps)
+    ssim_map = torch.nan_to_num(ssim_map, nan=0.0, posinf=1.0, neginf=0.0)
+    ssim_map = torch.clamp(ssim_map, min=-1.0, max=1.0)
     
     if size_average:
         return ssim_map.mean()
@@ -480,11 +487,22 @@ def calculate_multimodal_metrics(
             # 计算统计量
             frame_psnrs_tensor = torch.tensor(frame_psnrs)
             frame_ssims_tensor = torch.tensor(frame_ssims)
-            
-            metrics['video_psnr_mean'] = frame_psnrs_tensor.mean().item()
-            metrics['video_ssim_mean'] = frame_ssims_tensor.mean().item()
-            metrics['video_psnr_std'] = frame_psnrs_tensor.std().item()
-            metrics['video_ssim_std'] = frame_ssims_tensor.std().item()
+            psnr_finite = torch.isfinite(frame_psnrs_tensor)
+            ssim_finite = torch.isfinite(frame_ssims_tensor)
+
+            if psnr_finite.any():
+                metrics['video_psnr_mean'] = frame_psnrs_tensor[psnr_finite].mean().item()
+                metrics['video_psnr_std'] = frame_psnrs_tensor[psnr_finite].std().item()
+            else:
+                metrics['video_psnr_mean'] = 0.0
+                metrics['video_psnr_std'] = 0.0
+
+            if ssim_finite.any():
+                metrics['video_ssim_mean'] = frame_ssims_tensor[ssim_finite].mean().item()
+                metrics['video_ssim_std'] = frame_ssims_tensor[ssim_finite].std().item()
+            else:
+                metrics['video_ssim_mean'] = 0.0
+                metrics['video_ssim_std'] = 0.0
             
         except Exception as e:
             print(f"警告: 计算视频指标时出错: {e}")
