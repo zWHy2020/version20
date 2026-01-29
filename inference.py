@@ -1012,6 +1012,13 @@ def load_model(model_path: str, config: EvaluationConfig, device: torch.device, 
         model_config = checkpoint['model_config']
         model_config['pretrained'] = checkpoint['model_config'].get('pretrained', False)
         model_config['freeze_encoder'] = False
+        if "video_decoder_type" not in model_config:
+            fallback_decoder = getattr(config, "video_decoder_type", "swin")
+            logger.warning(
+                "⚠️ Checkpoint 中缺少 video_decoder_type，回退到推理配置: %s",
+                fallback_decoder,
+            )
+            model_config["video_decoder_type"] = fallback_decoder
         if 'img_embed_dims' in model_config:
             config.img_embed_dims = model_config['img_embed_dims']
         if getattr(config, "image_decoder_type_override", None) is not None:
@@ -1136,6 +1143,16 @@ def load_model(model_path: str, config: EvaluationConfig, device: torch.device, 
     print_model_structure_info(model, logger)
     if not check_state_dict_compatibility(model, state_dict, logger):
         raise RuntimeError("严重错误：尽管使用了保存的配置，权重维度依然不匹配！请检查代码是否被修改过。")
+    model_state_keys = set(model.state_dict().keys())
+    unexpected_keys = [key for key in state_dict.keys() if key not in model_state_keys]
+    if unexpected_keys:
+        preview = ", ".join(sorted(unexpected_keys)[:10])
+        logger.warning(
+            "⚠️ 检测到 %d 个 checkpoint 权重在当前模型中不存在，将自动忽略。示例: %s",
+            len(unexpected_keys),
+            preview if preview else "无",
+        )
+        state_dict = {key: value for key, value in state_dict.items() if key in model_state_keys}
     model.load_state_dict(state_dict, strict=True) # 建议改为 True，有问题直接报出来
     model = model.to(device)
     model.eval()
