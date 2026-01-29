@@ -1019,6 +1019,24 @@ def load_model(model_path: str, config: EvaluationConfig, device: torch.device, 
                 fallback_decoder,
             )
             model_config["video_decoder_type"] = fallback_decoder
+        if "video_latent_downsample_factor" not in model_config:
+            fallback_factor = getattr(config, "video_latent_downsample_factor", None)
+            if fallback_factor is None:
+                fallback_factor = getattr(config, "video_latent_downsample_stride", None)
+            if fallback_factor is None:
+                fallback_factor = 2
+            logger.warning(
+                "⚠️ Checkpoint 中缺少 video_latent_downsample_factor，回退到推理配置: %s",
+                fallback_factor,
+            )
+            model_config["video_latent_downsample_factor"] = fallback_factor
+        if "video_latent_downsample_stride" not in model_config:
+            fallback_stride = model_config.get("video_latent_downsample_factor")
+            if fallback_stride is None:
+                fallback_stride = getattr(config, "video_latent_downsample_stride", None)
+            if fallback_stride is None:
+                fallback_stride = getattr(config, "video_latent_downsample_factor", 2)
+            model_config["video_latent_downsample_stride"] = fallback_stride
         if 'img_embed_dims' in model_config:
             config.img_embed_dims = model_config['img_embed_dims']
         if getattr(config, "image_decoder_type_override", None) is not None:
